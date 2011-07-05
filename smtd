@@ -57,9 +57,7 @@ $ARGV{tempo}      ||= $opus->bpm;
 
 $opus = $opus->to_format_1;
 $opus->set_bpm($ARGV{tempo});
-$opus->dump({dump_tracks=>1});
 
-die;
 
 # main program:
 # The strategy is to make all midi events' delta-times absolute,
