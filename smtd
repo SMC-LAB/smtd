@@ -1,32 +1,30 @@
 #!/usr/bin/env perl
 
-use strict; use warnings;
-use Data::Dumper; use Getopt::Long qw/:config auto_version auto_help/;
-use version; our $VERSION = '0.0.1';
-use List::Util; use Carp; use Pod::Usage;
-
+use strict; 
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+use List::Util; 
 eval "require MIDI"
 or die 'mtd.pl: requires the MIDI module to work. See <http://www.cpan.org/modules/INSTALL.html>.';
+
+use version; our $VERSION = '0.0.1';
+
 
 # prepare command-line options and arguments,
 # check required options, add some boiler plate options (help, manual, etc)
 # redirect input/output/err files to canonical handles,
-# allow user to specify either positional or named patterns
-# note that named patterns, if present, override positional ones
 GetOptions(
     \%ARGV,
     'input|i=s', 'output|o=s', 'err|e=s',
-    'note|n=i', 'magnitude|m=f',
+    'resolution|r=i', 'magnitude|m=f',
     'pattern|p=f@{,}', 'named-pattern|np=f%',
+    'tolerance|t=f', 'loop|l=i',
     _meta_options(\%ARGV),
-) and @ARGV{qw/note magnitude pattern/}
+) and ($ARGV{pattern} or $ARGV{'named-pattern'})
 or pod2usage(-verbose => 1);
 
 my ( $INH, $OUTH, $ERRH ) = _prepare_io( \%ARGV, \@ARGV );
-
-$ARGV{'pattern'}
-= named_to_positional_pattern($ARGV{'named-pattern'})
-if $ARGV{'named-pattern'};
 
 
 # read in midi file either from STDIN or file,
@@ -39,38 +37,60 @@ my $opus = MIDI::Opus->new({
     : (from_handle => $INH)
 });
 
-die 'mtd.pl: wrong MIDI file format: ',
+die 'smtd: wrong MIDI file format: ',
     $opus->format,
     ' (should be format 1 --- synchronous multitracks)'
 unless $opus->format == 1;
 
 
+# default resolution to fastest metrical level
+# default magnitude to 1 ms, this allows to use -p in absolute terms
+# default grid tolerance to 0 ms
+# allow user to specify either positional or named patterns
+# note that named patterns, if present, override positional ones
+$ARGV{resolution} ||= $opus->fastest_metrical_level;
+$ARGV{magnitude}  ||= 1;
+$ARGV{tolerance}  ||= 0;
+$ARGV{pattern}      = named_to_positional_pattern($ARGV{'named-pattern'})
+                      if $ARGV{'named-pattern'};
+$ARGV{loop}       ||= 1;
+
+
 # main program:
 # The strategy is to make all midi events' delta-times absolute,
-# that is, relative to the first one.
+# that is, relative to the very first event offset.
 my $abs_events = $opus->rel2abs;
 
-# Then, change each event that falls within the grid
+# Then, change each event that falls on the grid
 # *SORT* the events by their new absolute position
 # since some later ones may now have a smaller value than earlier ones
 my @abs_events
 = sort { $a->[1] <=> $b->[1] }
 map {
-    $opus->mtd( $_, $ARGV{note}, $ARGV{magnitude}, $ARGV{pattern} )
-}
-@$abs_events;
+    $opus->mtd(
+        event => $_,
+        resolution  => $ARGV{resolution},
+        magnitude => $ARGV{magnitude},
+        weights => $ARGV{pattern},
+        tolerance => $ARGV{tolerance}
+    )
+} @$abs_events;
 
 # we can now replace the original events by the modified ones,
 # after converting them back to relative offsets, knowing that
 # there can be no negative offsets, due to the sorting.
+my $rel_events = $opus->abs2rel(\@abs_events);
 $opus->tracks_r->[1]->events_r(
-    $opus->abs2rel(\@abs_events)
+
+    # this just concatenates multiple copies of the events
+    # for replicating the input measure[s] $ARGV{loop} times
+    [ map { @$rel_events } 1 .. $ARGV{loop} ]
+
 );
 
-
-# and we're done
+# and we're done!
 # if we print to STDOUT, binary data might screw up the terminal
-# $ reset if so.
+# run '$ reset' if that happens
 $ARGV{output}
 ? $opus->write_to_file($ARGV{output})
 : $opus->write_to_handle($OUTH);
@@ -92,6 +112,8 @@ sub _meta_options {
                                         -verbose  => 99 )                      },
         'usage'     => sub { pod2usage( -sections => ['SYNOPSIS'],
                                         -verbose  => 99 )                      },
+        'options'   => sub { pod2usage( -sections => ['OPTIONS'],
+                                        -verbose  => 99 )                      },
         'help'      => sub { pod2usage( -verbose  => 1  )                      },
         'manual'    => sub { pod2usage( -verbose  => 2  )                      },
     );
@@ -108,7 +130,7 @@ sub _prepare_io {
     if (    exists $opt->{input} and exists $opt->{output}
                and $opt->{input} eq $opt->{output} ) {
         open $INH, q{<}, $opt->{input}
-            or croak "Can't read $opt->{input}: $!";
+            or die "Can't read $opt->{input}: $!";
         unlink $opt->{output};
     }
     else { $INH = *STDIN }
@@ -116,19 +138,19 @@ sub _prepare_io {
     # Redirect STDOUT to a file if so specified
     if ( exists $opt->{output} and q{-} ne $opt->{output} ) {
         open $OUTH, q{>}, $opt->{output}
-            or croak "Can't write $opt->{output}: $!";
+            or die "Can't write $opt->{output}: $!";
     }
     else { $OUTH = *STDOUT }
 
     # Log STDERR if so specified
     if ( exists $opt->{error} and q{-} ne $opt->{error} ) {
         open $ERRH, q{>}, $opt->{error}
-            or croak "Can't write $opt->{error}: $!";
+            or die "Can't write $opt->{error}: $!";
     }
     elsif ( exists $opt->{quiet} and $opt->{quiet} ) {
         use File::Spec;
         open $ERRH, q{>}, File::Spec->devnull
-            or croak "Can't write $opt->{error}: $!";
+            or die "Can't write $opt->{error}: $!";
     }
     else { $ERRH = *STDERR }
 
@@ -137,7 +159,7 @@ sub _prepare_io {
 
 # utilities
 sub named_to_positional_pattern {
-    my ($named) = @_;
+    my ($named) = @_ or return;
 
     my @positional = map { $named->{$_} || 0 }
     (1 .. List::Util::max(keys %$named));
@@ -163,6 +185,14 @@ sub beats_per_measure {
         shift->tracks_r->[0]->events
     )->[2];
 }
+sub fastest_metrical_level {
+    return $_[0]->beats_per_measure
+    *
+    (
+        List::Util::first { $_->[0] eq 'time_signature' } 
+        $_[0]->tracks_r->[0]->events
+    )->[5];
+}
 sub set_tempo {
     return (
         List::Util::first { $_->[0] eq 'set_tempo' } 
@@ -174,18 +204,18 @@ sub mu_per_tick { return $_[0]->set_tempo / $_[0]->ticks }
 sub ms_per_tick { return $_[0]->mu_per_tick / 1000 }
 sub ms_to_ticks { return sprintf("%.0f", $_[1] / $_[0]->ms_per_tick) }
 sub mtd {
-    my ($self, $event, $note, $magnitude, $weights) = @_;
+    my ($self, %o) = @_;
 
-    if (my $weight_index = $self->in_grid($event, $note, 0)) {
+    if (my $weight_index = $self->in_grid($o{event}, $o{resolution}, $o{tolerance})) {
 
-        $event->[1]
+        $o{event}->[1]
         += sprintf(
             "%.0f",
-            $self->ms_to_ticks($magnitude * $weights->[$weight_index])
+            $self->ms_to_ticks($o{magnitude} * $o{weights}->[$weight_index])
         );
     }
 
-    return $event;
+    return $o{event};
 }
 sub tick_length {
     return List::Util::sum
@@ -282,34 +312,53 @@ __END__
 
 =head1 NAME
 
- mtd.pl - Introduce systematic microtiming deviations into a MIDI file
+ smtd - Introduce systematic microtiming deviations into a MIDI file
 
 
 =head1 SYNOPSIS
 
- mtd.pl -n NOTE_VALUE -m MAGNITUDE -p WEIGHT_i[, WEIGHT_n[,...]] < rhythm.mid > mtd-rhythm.mid
+ smtd < [-p WEIGHT_i ...] | [-np i=WEIGHT_i ...]>
+      [-r RESOLUTION]                   
+      [-m MAGNITUDE]                    
+      [-i|< [rhythm.mid]]
+      [-o|> [mtd-rhythm.mid]]
+
+ # explicit 8th note resolution, 30ms magnitude, positional weight pattern
+ smtd -r 8 -m 30 -p 0 0 1 0.5 0 0 1 0.5 -i in.mid -o out.mid
+
+ # explicit 16th note resolution, selected named weight pattern
+ smtd -r 16 -m 30 -np 4=1 -np 8=0.5 -i in.mid -o out.mid
+
+ # implicit signature-based resolution, magnitude, STDIN and STDOUT
+ smtp --named 1=1 3=30.0 5=15.0 7=30.0 9=15.0 < in.mid > out.mid
 
 
 =head1 DESCRIPTION
 
- Takes a format-1 MIDI file via STDIN, positional argument or named argument (-i, --input),
- and prints it to STDOUT or a file (-o, --output) with certain note_on and note_off events
- offset by a weighted magnitude, given in milliseconds and coefficients, respectively.
+ Takes a format-1 MIDI file via STDIN, positional, or named argument,
+ and prints it to STDOUT or a file with certain note_on and note_off
+ events offset by a weighted magnitude in milliseconds.
  
 
 =head1 OPTIONS
 
- -n,  --note          <integer>         note durations in pattern (1 - whole note, 2 - half note, 4 - quarter note, ...)
- -m,  --magnitude     <decimal>         maximum deviation in milliseconds
- -p,  --pattern       <decimals ...>    weights to apply to each note position in measure (list size must be equal to --note argument)
- -np, --named-pattern [-np k=v -np ...] values to apply as coefficients to each respective key position
- -o,  --output        [string]          output filename                          (STDOUT)
-      --verbose       [integer]         print increasingly verbose error messages
-      --quiet                           print no diagnostic or warning messages
-      --version                         print current version
-      --license                         print author's contact and copyright information
-      --help                            print this information
-      --manual                          print the plain old documentation page
+ -i,  --input      [string]   (STDIN)     input MIDI filename  
+ -o,  --output     [string]   (STDOUT)    output MIDI filename
+ -e,  --error      [string]   (STDERR)    error log filename
+ -r,  --resolution [integer]  (MIDI DIV)  note durations in pattern
+                                          (2-hn, 4-qn, ...)
+ -m,  --magnitude  [decimal]  (1)         maximum deviation in ms
+ -p,  --pattern    [decimal list]         weights/position in measure
+                                          size(weights)=resolution))
+ -n,  --npattern   [integer=decimal list] position=weight in measure
+      --verbose    [integer]              verbose error messages
+      --quiet                             no warning messages
+      --version                           print current version
+      --license                           author and copyright
+      --help                              print this information
+      --usage                             usage only
+      --options                           options only
+      --manual                            complete manual page
 
 
 =head1 VERSION
@@ -319,13 +368,15 @@ __END__
 
 =head1 AUTHOR
 
- Pedro Silva <pasilva@inescporto.pt>
- Sound and Music Computing Group
- Telecommunications and Multimedia Group
+ Pedro Silva <pasilva@inescporto.pt> 
+ Sound and Music Computing Group 
+ Telecommunications and Multimedia Unit
  INESC Porto
 
 
 =head1 COPYRIGHT
+
+ Copyright (C) 2011 Pedro Silva
 
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
