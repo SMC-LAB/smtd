@@ -8,7 +8,7 @@ use List::Util;
 eval "require MIDI"
 or die 'mtd.pl: requires the MIDI module to work. See <http://www.cpan.org/modules/INSTALL.html>.';
 
-use version; our $VERSION = '0.0.1';
+use version; our $VERSION = '0.0.2';
 
 
 # prepare command-line options and arguments,
@@ -19,7 +19,7 @@ GetOptions(
     'input|i=s', 'output|o=s', 'err|e=s',
     'resolution|r=i', 'magnitude|m=f',
     'pattern|p=f@{,}', 'named-pattern|np=f%',
-    'tolerance|t=f', 'loop|l=i',
+    'tolerance|t=f', 'loop|l=i', 'tempo|t=f',
     _meta_options(\%ARGV),
 ) and ($ARGV{pattern} or $ARGV{'named-pattern'})
 or pod2usage(-verbose => 1);
@@ -37,11 +37,10 @@ my $opus = MIDI::Opus->new({
     : (from_handle => $INH)
 });
 
-die 'smtd: wrong MIDI file format: ',
-    $opus->format,
-    ' (should be format 1 --- synchronous multitracks)'
-unless $opus->format == 1;
-
+# die 'smtd: wrong MIDI file format: ',
+#     $opus->format,
+#     ' (should be format 1 --- synchronous multitracks)'
+# unless $opus->format == 1;
 
 # default resolution to fastest metrical level
 # default magnitude to 1 ms, this allows to use -p in absolute terms
@@ -54,7 +53,13 @@ $ARGV{tolerance}  ||= 0;
 $ARGV{pattern}      = named_to_positional_pattern($ARGV{'named-pattern'})
                       if $ARGV{'named-pattern'};
 $ARGV{loop}       ||= 1;
+$ARGV{tempo}      ||= $opus->bpm;
 
+$opus = $opus->to_format_1;
+$opus->set_bpm($ARGV{tempo});
+$opus->dump({dump_tracks=>1});
+
+die;
 
 # main program:
 # The strategy is to make all midi events' delta-times absolute,
@@ -199,6 +204,15 @@ sub set_tempo {
         shift->tracks_r->[0]->events
     )->[2];
 }
+sub set_bpm {
+    my $tempo_event =
+    List::Util::first { $_->[0] eq 'set_tempo' } 
+    @{$_[0]->tracks_r->[0]->events_r};
+
+    $tempo_event->[2] = $_[0]->bpm_to_set_tempo($_[1]);
+    return $tempo_event;
+}
+sub bpm_to_set_tempo { return sprintf("%.0f", 60_000_000 / $_[1]) }
 sub bpm { return 60_000_000 / $_[0]->set_tempo }
 sub mu_per_tick { return $_[0]->set_tempo / $_[0]->ticks }
 sub ms_per_tick { return $_[0]->mu_per_tick / 1000 }
@@ -306,7 +320,34 @@ sub abs2rel {
     
     return \@rel;
 }
+sub to_format_1 {
+    my ($self) = @_;
+    return $self if $self->format == 1;
 
+    my $copy = $self->copy;
+
+    my (@track_1_events, @track_2_events);
+    my %event_dispatch = (
+        time_signature => \@track_1_events,
+        set_tempo      => \@track_1_events,
+        note_on        => \@track_2_events,
+        note_off       => \@track_2_events,
+    );
+    
+    for my $track (@{$copy->tracks_r}) {
+        while (my $event = shift @{$track->events_r}) {
+            push (($event_dispatch{$event->[0]} || \@track_1_events), $event);
+        }
+    }
+
+    $copy->format(1);
+    $copy->tracks(
+        MIDI::Track->new({events => \@track_1_events}),
+        MIDI::Track->new({events => \@track_2_events}),
+    );
+
+    return $copy;
+}
 __END__
 
 
@@ -351,6 +392,8 @@ __END__
  -p,  --pattern    [decimal list]         weights/position in measure
                                           size(weights)=resolution))
  -n,  --npattern   [integer=decimal list] position=weight in measure
+ -l,  --loop       [integer]              loop MIDI track n times
+ -t,  --tempo      [decimal]              override MIDI tempo in BPM
       --verbose    [integer]              verbose error messages
       --quiet                             no warning messages
       --version                           print current version
@@ -363,7 +406,7 @@ __END__
 
 =head1 VERSION
 
- 0.0.1
+ 0.0.2
 
 
 =head1 AUTHOR
