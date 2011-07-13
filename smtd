@@ -5,10 +5,11 @@ use warnings;
 use Getopt::Long;
 use Pod::Usage;
 use List::Util; 
+use Data::Dumper;
 eval "require MIDI"
-or die 'mtd.pl: requires the MIDI module to work. See <http://www.cpan.org/modules/INSTALL.html>.';
+or die 'smtd: requires the MIDI module to work. See <http://www.cpan.org/modules/INSTALL.html>.';
 
-use version; our $VERSION = '0.0.2';
+use version; our $VERSION = '0.0.4';
 
 
 # prepare command-line options and arguments,
@@ -16,13 +17,14 @@ use version; our $VERSION = '0.0.2';
 # redirect input/output/err files to canonical handles,
 GetOptions(
     \%ARGV,
-    'input|i=s', 'output|o=s', 'err|e=s',
-    'resolution|r=i', 'magnitude|m=f',
-    'pattern|p=f@{,}', 'named-pattern|np=f%',
-    'tolerance|t=f', 'loop|l=i', 'tempo|t=f',
+    'input|i=s'      , 'output|o=s'           , 'err|e=s',
+    'resolution|r=i' , 'magnitude|m=f'        ,
+    'pattern|p=f@{,}', 'named-pattern|np=f%'  ,
+    'tolerance|t=f'  , 'loop|l=i'             , 'tempo|b=f',
+    'dump|d'         , 'transpose|s=i%'       , 'debug',
+    'clip|c',
     _meta_options(\%ARGV),
-) and ($ARGV{pattern} or $ARGV{'named-pattern'})
-or pod2usage(-verbose => 1);
+) or pod2usage(-verbose => 1);
 
 my ( $INH, $OUTH, $ERRH ) = _prepare_io( \%ARGV, \@ARGV );
 
@@ -37,10 +39,6 @@ my $opus = MIDI::Opus->new({
     : (from_handle => $INH)
 });
 
-# die 'smtd: wrong MIDI file format: ',
-#     $opus->format,
-#     ' (should be format 1 --- synchronous multitracks)'
-# unless $opus->format == 1;
 
 # default resolution to fastest metrical level
 # default magnitude to 1 ms, this allows to use -p in absolute terms
@@ -50,19 +48,29 @@ my $opus = MIDI::Opus->new({
 $ARGV{resolution} ||= $opus->fastest_metrical_level;
 $ARGV{magnitude}  ||= 1;
 $ARGV{tolerance}  ||= 0;
+$ARGV{dump}       ||= 0;
+$ARGV{pattern}    ||= [(1) x $ARGV{resolution}];
 $ARGV{pattern}      = named_to_positional_pattern($ARGV{'named-pattern'})
                       if $ARGV{'named-pattern'};
+$ARGV{pattern}      = normalize_pattern($ARGV{pattern});
 $ARGV{loop}       ||= 1;
 $ARGV{tempo}      ||= $opus->bpm;
 
+
 $opus = $opus->to_format_1;
 $opus->set_bpm($ARGV{tempo});
+$opus->transpose($ARGV{transpose}) if $ARGV{transpose};
 
+if ($ARGV{dump}) {
+    $opus->dump({dump_tracks => 1, flat => 0});
+    exit;
+}
 
 # main program:
 # The strategy is to make all midi events' delta-times absolute,
 # that is, relative to the very first event offset.
 my $abs_events = $opus->rel2abs;
+
 
 # Then, change each event that falls on the grid
 # *SORT* the events by their new absolute position
@@ -71,13 +79,14 @@ my @abs_events
 = sort { $a->[1] <=> $b->[1] }
 map {
     $opus->mtd(
-        event => $_,
-        resolution  => $ARGV{resolution},
-        magnitude => $ARGV{magnitude},
-        weights => $ARGV{pattern},
-        tolerance => $ARGV{tolerance}
+        event      => $_,
+        resolution => $ARGV{resolution},
+        magnitude  => $ARGV{magnitude},
+        weights    => $ARGV{pattern},
+        tolerance  => $ARGV{tolerance}
     )
 } @$abs_events;
+
 
 # we can now replace the original events by the modified ones,
 # after converting them back to relative offsets, knowing that
@@ -87,9 +96,26 @@ $opus->tracks_r->[1]->events_r(
 
     # this just concatenates multiple copies of the events
     # for replicating the input measure[s] $ARGV{loop} times
-    [ map { @$rel_events } 1 .. $ARGV{loop} ]
+    [ map { 
+        my $i = $_;
+
+        # this optionally clips events ending
+        # beyond the measure, for looping purposes
+        map {
+            $ARGV{clip}
+            ? clip_at_bar($_, $opus->tick_length * $i)
+            : $_
+        } @$rel_events
+    } 1 .. $ARGV{loop} ]
 
 );
+
+
+if ($ARGV{debug}) {
+    $opus->debug;
+    exit;
+}
+
 
 # and we're done!
 # if we print to STDOUT, binary data might screw up the terminal
@@ -97,8 +123,6 @@ $opus->tracks_r->[1]->events_r(
 $ARGV{output}
 ? $opus->write_to_file($ARGV{output})
 : $opus->write_to_handle($OUTH);
-
-
 
 
 
@@ -169,6 +193,14 @@ sub named_to_positional_pattern {
 
     return \@positional;
 }
+sub normalize_pattern {
+    my ($pattern) = @_;
+
+    my $norm_factor = List::Util::max(@$pattern);
+
+    return $pattern unless $norm_factor;
+    return [map { $_ / $norm_factor } @$pattern];
+}
 sub group_by {
     my ($n, @list, @group_by) = @_;
 
@@ -177,29 +209,67 @@ sub group_by {
 
     return @group_by;
 }
+{
+    my $current_tick = 0;
+    sub clip_at_bar {
+        my ($event, $max_tick) = @_;
+        
+        $current_tick += $event->[1];
+        return $event unless $current_tick >= $max_tick;
+        my $delta = $max_tick - $current_tick;
+        return ['note_off', $delta < 0 ? 0 : $delta, @{$event}[2 .. 4]];
+    }
+}
 
 
 # Monkey-patch MIDI::Opus for the syntactic sugar.
 # this defines useful conversion functions, predicates, etc.
 package MIDI::Opus;
+use Data::Dumper;
+sub debug {
+    my ($self) = @_;
+    
+    my $events = [$self->tracks_r->[1]->events];
+    $events->[0][5] = 0;
+    $events->[0][0] =~ s/_on/_on /;
+
+    for (1 .. @$events - 1) {
+        $events->[$_][0] =~ s/_on/_on /;
+        $events->[$_][5] = $events->[$_][1] + $events->[$_ - 1][5];
+    }
+
+    print STDERR join( "\t", @{$_}[5,1,3,0] ), "\n" for @$events;
+    return $events;
+}
+sub transpose {
+    my ($self, $map) = @_;
+
+    for (grep { $_->[0] =~ m/note_o(n|ff)/ } @{$self->tracks_r->[1]->events_r}) {
+
+        exists $map->{$_->[3]} ? $_->[3] = $map->{$_->[3]} : next;
+    }
+    
+    return $self;
+}
 sub beats_per_measure {
-    return (
-        List::Util::first { $_->[0] eq 'time_signature' } 
-        shift->tracks_r->[0]->events
-    )->[2];
+    my $beats =  List::Util::first { $_->[0] eq 'time_signature' } 
+    shift->tracks_r->[0]->events;
+
+    $beats ||= [(undef) x 2, 4];
+    return $beats->[2];
 }
 sub fastest_metrical_level {
-    return $_[0]->beats_per_measure
-    *
-    (
-        List::Util::first { $_->[0] eq 'time_signature' } 
-        $_[0]->tracks_r->[0]->events
-    )->[5];
+    my $level = List::Util::first { $_->[0] eq 'time_signature' } 
+    $_[0]->tracks_r->[0]->events;
+
+    $level ||= [(undef) x 5, 16];
+    return $_[0]->beats_per_measure * $level->[5];
 }
 sub set_tempo {
     return (
         List::Util::first { $_->[0] eq 'set_tempo' } 
         shift->tracks_r->[0]->events
+        or [undef, undef, 500_000] ## workaround hydrogen, which doesn't spit out decent MIDI
     )->[2];
 }
 sub set_bpm {
@@ -207,7 +277,12 @@ sub set_bpm {
     List::Util::first { $_->[0] eq 'set_tempo' } 
     @{$_[0]->tracks_r->[0]->events_r};
 
-    $tempo_event->[2] = $_[0]->bpm_to_set_tempo($_[1]);
+    my $tempo = $_[0]->bpm_to_set_tempo($_[1]);
+
+    push @{$_[0]->tracks_r->[0]->events_r}, ['set_tempo', 0, $tempo]
+    unless $tempo_event;
+
+    $tempo_event->[2] = $tempo;
     return $tempo_event;
 }
 sub bpm_to_set_tempo { return sprintf("%.0f", 60_000_000 / $_[1]) }
@@ -218,8 +293,9 @@ sub ms_to_ticks { return sprintf("%.0f", $_[1] / $_[0]->ms_per_tick) }
 sub mtd {
     my ($self, %o) = @_;
 
-    if (my $weight_index = $self->in_grid($o{event}, $o{resolution}, $o{tolerance})) {
+    my $weight_index = $self->in_grid($o{event}, $o{resolution}, $o{tolerance});
 
+    if (defined $weight_index) {
         $o{event}->[1]
         += sprintf(
             "%.0f",
@@ -234,11 +310,11 @@ sub tick_length {
     map { $_->[1] }
     $_[0]->tracks_r->[1]->events
 }
-sub note_count { 
+sub note_count {
     return sprintf(
         "%.0f",
         ($_[0]->tick_length / $_[0]->ticks)
-        * ($_[1] / $opus->beats_per_measure)
+        * ($_[1] / $_[0]->beats_per_measure)
     )
 }
 sub get_grid {
@@ -248,26 +324,24 @@ sub get_grid {
     main::group_by(
         $note,
         map { $_ * $self->ticks / ($note / $opus->beats_per_measure) }
-        0 .. $self->note_count($note)
-    );;
+        0 .. $self->note_count($note) - 1
+    );
 }
-{
-    my $tick = 0;
+sub in_grid {
+    my ($self, $event, $note, $tolerance) = @_;
 
-    sub in_grid {
-        my ($self, $event, $note, $tolerance) = @_;
+    $tolerance = $self->ms_to_ticks($tolerance);
+    my $ticks = $self->tick_length;
 
-        $tick += $event->[1];
-        $tolerance = $self->ms_to_ticks($tolerance);
+    for my $measure ($self->get_grid($note)) {
+        for my $nth_note (0 .. @$measure - 1) {
 
-        for my $measure ($self->get_grid($note)) {
-            for my $nth_note (1 .. @$measure) {
-                return $nth_note - 1
-                if  $tick >= $measure->[$nth_note - 1] - $tolerance
-                and $tick <= $measure->[$nth_note - 1] + $tolerance;
-            }                
+            my $tick_in_bar = $event->[1] % $ticks;
+
+            return $nth_note
+            if  $tick_in_bar >= $measure->[$nth_note] - $tolerance
+            and $tick_in_bar <= $measure->[$nth_note] + $tolerance;
         }
-        return;
     }
 }
 sub scale_grid {
@@ -295,10 +369,10 @@ sub shift_grid {
 sub rel2abs {
     my ($self) = @_;
 
-    my @abs = ($self->tracks_r->[1]->events_r->[0]);
+    my @abs = ();
 
     for (@{$self->tracks_r->[1]->events_r}) {
-        my $accumulator = $abs[-1]->[1] + $_->[1];
+        my $accumulator = @abs ? $abs[-1]->[1] + $_->[1] : $_->[1];
         push @abs, [$_->[0], $accumulator, @{$_}[2 .. @{$_}-1]];
     }
 
@@ -320,7 +394,8 @@ sub abs2rel {
 }
 sub to_format_1 {
     my ($self) = @_;
-    return $self if $self->format == 1;
+    return $self if $self->format == 1
+    && $self->tracks > 1;
 
     my $copy = $self->copy;
 
@@ -356,9 +431,9 @@ __END__
 
 =head1 SYNOPSIS
 
- smtd < [-p WEIGHT_i ...] | [-np i=WEIGHT_i ...]>
+ smtd [ [-p WEIGHT_i ...] | [-np i=WEIGHT_i ...] ]
       [-r RESOLUTION]                   
-      [-m MAGNITUDE]                    
+      [-m MAGNITUDE]
       [-i|< [rhythm.mid]]
       [-o|> [mtd-rhythm.mid]]
 
@@ -391,7 +466,12 @@ __END__
                                           size(weights)=resolution))
  -n,  --npattern   [integer=decimal list] position=weight in measure
  -l,  --loop       [integer]              loop MIDI track n times
- -t,  --tempo      [decimal]              override MIDI tempo in BPM
+ -b,  --tempo      [decimal]              override MIDI tempo in BPM
+ -t,  --tolerance  [decimal]              grid tolerance in ms
+ -s,  --transpose  [integer=integer list] transpose note n to m
+ -d,  --dump       [bool]                 print text representation
+ -c,  --clip       [bool]                 clip events beyond bar
+      --debug      [bool]                 print event list
       --verbose    [integer]              verbose error messages
       --quiet                             no warning messages
       --version                           print current version
@@ -404,7 +484,7 @@ __END__
 
 =head1 VERSION
 
- 0.0.2
+ 0.0.4
 
 
 =head1 AUTHOR
