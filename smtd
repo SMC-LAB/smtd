@@ -9,7 +9,7 @@ use Data::Dumper;
 eval "require MIDI"
 or die 'smtd: requires the MIDI module to work. See <http://www.cpan.org/modules/INSTALL.html>.';
 
-use version; our $VERSION = '0.0.4';
+use version; our $VERSION = '0.1.0';
 
 
 # prepare command-line options and arguments,
@@ -22,7 +22,7 @@ GetOptions(
     'pattern|p=f@{,}', 'named-pattern|np=f%'  ,
     'tolerance|t=f'  , 'loop|l=i'             , 'tempo|b=f',
     'dump|d'         , 'transpose|s=i%'       , 'debug',
-    'clip|c',
+    'clip|c',        , 'bank|k=i%',
     _meta_options(\%ARGV),
 ) or pod2usage(-verbose => 1);
 
@@ -59,7 +59,8 @@ $ARGV{tempo}      ||= $opus->bpm;
 
 $opus = $opus->to_format_1;
 $opus->set_bpm($ARGV{tempo});
-$opus->transpose($ARGV{transpose}) if $ARGV{transpose};
+$opus->transpose($ARGV{transpose}, 3) if $ARGV{transpose};
+$opus->transpose($ARGV{bank}, 2) if $ARGV{bank};
 
 if ($ARGV{dump}) {
     $opus->dump({dump_tracks => 1, flat => 0});
@@ -242,11 +243,12 @@ sub debug {
     return $events;
 }
 sub transpose {
-    my ($self, $map) = @_;
+    my ($self, $map, $index) = @_;
+
+    $index ||= 3;
 
     for (grep { $_->[0] =~ m/note_o(n|ff)/ } @{$self->tracks_r->[1]->events_r}) {
-
-        exists $map->{$_->[3]} ? $_->[3] = $map->{$_->[3]} : next;
+        exists $map->{$_->[$index]} ? $_->[$index] = $map->{$_->[$index]} : next;
     }
     
     return $self;
@@ -471,6 +473,7 @@ __END__
  -s,  --transpose  [integer=integer list] transpose note n to m
  -d,  --dump       [bool]                 print text representation
  -c,  --clip       [bool]                 clip events beyond bar
+ -k,  --bank       [integer=integer list] transpose channel n to m
       --debug      [bool]                 print event list
       --verbose    [integer]              verbose error messages
       --quiet                             no warning messages
@@ -484,7 +487,7 @@ __END__
 
 =head1 VERSION
 
- 0.0.4
+ 0.1.0
 
 
 =head1 AUTHOR
