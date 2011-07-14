@@ -411,7 +411,9 @@ sub to_format_1 {
     
     for my $track (@{$copy->tracks_r}) {
         while (my $event = shift @{$track->events_r}) {
-            push (($event_dispatch{$event->[0]} || \@track_1_events), $event);
+            my $track_n_events
+            = $event_dispatch{$event->[0]} || \@track_1_events;
+            push @$track_n_events, $event;
         }
     }
 
