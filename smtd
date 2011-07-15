@@ -17,12 +17,12 @@ use version; our $VERSION = '0.1.0';
 # redirect input/output/err files to canonical handles,
 GetOptions(
     \%ARGV,
-    'input|i=s'      , 'output|o=s'           , 'err|e=s',
-    'resolution|r=i' , 'magnitude|m=f'        ,
-    'pattern|p=s@{,}', 'named-pattern|np=f%'  ,
-    'tolerance|t=f'  , 'loop|l=i'             , 'tempo|b=f',
-    'dump|d'         , 'transpose|s=i%'       , 'debug',
-    'clip|c',        , 'bank|k=i%',
+    'input|i=s', 'output|o=s', 'err|e=s',
+    'resolution|r=i', 'magnitude|m=f',
+    'pattern|p=s@{,}', 'named-pattern|np=f%',
+    'tolerance|t=f', 'loop|l=i', 'tempo|b=f',
+    'dump|d', 'transpose|s=i%', 'debug',
+    'clip|c', 'bank|k=i%', 'play|y',
     _meta_options(\%ARGV),
 ) or pod2usage(-verbose => 1);
 
@@ -175,6 +175,10 @@ sub _prepare_io {
     if ( exists $opt->{output} and q{-} ne $opt->{output} ) {
         open $OUTH, q{>}, $opt->{output}
             or die "Can't write $opt->{output}: $!";
+    }
+    elsif ( exists $opt->{play} ) {
+        open $OUTH, '|-', 'timidity -idqq -EFreverb=0 -EFchorus=0 -A120 -OsM -'
+        or die "Can't pipe to timidity: $!";
     }
     else { $OUTH = *STDOUT }
 
