@@ -19,7 +19,7 @@ GetOptions(
     \%ARGV,
     'input|i=s'      , 'output|o=s'           , 'err|e=s',
     'resolution|r=i' , 'magnitude|m=f'        ,
-    'pattern|p=f@{,}', 'named-pattern|np=f%'  ,
+    'pattern|p=s@{,}', 'named-pattern|np=f%'  ,
     'tolerance|t=f'  , 'loop|l=i'             , 'tempo|b=f',
     'dump|d'         , 'transpose|s=i%'       , 'debug',
     'clip|c',        , 'bank|k=i%',
@@ -52,10 +52,13 @@ $ARGV{dump}       ||= 0;
 $ARGV{pattern}    ||= [(1) x $ARGV{resolution}];
 $ARGV{pattern}      = named_to_positional_pattern($ARGV{'named-pattern'})
                       if $ARGV{'named-pattern'};
-$ARGV{pattern}      = normalize_pattern($ARGV{pattern});
 $ARGV{loop}       ||= 1;
 $ARGV{tempo}      ||= $opus->bpm;
 
+# die sprintf
+# "Option -p (%s) requires a number of elements equal to those in option -r (%s)",
+# scalar @{$ARGV{pattern}}, scalar $ARGV{resolution}
+# if $ARGV{resolution} > @{$ARGV{pattern}};
 
 $opus = $opus->to_format_1;
 $opus->set_bpm($ARGV{tempo});
@@ -72,7 +75,6 @@ if ($ARGV{dump}) {
 # that is, relative to the very first event offset.
 my $abs_events = $opus->rel2abs;
 
-
 # Then, change each event that falls on the grid
 # *SORT* the events by their new absolute position
 # since some later ones may now have a smaller value than earlier ones
@@ -83,11 +85,17 @@ map {
         event      => $_,
         resolution => $ARGV{resolution},
         magnitude  => $ARGV{magnitude},
-        weights    => $ARGV{pattern},
+        weights    => get_pattern(
+            $ARGV{pattern},
+            $opus->current_bar(
+                $ARGV{resolution},
+                $_
+            )
+        ),
         tolerance  => $ARGV{tolerance}
     )
 } @$abs_events;
-
+    
 
 # we can now replace the original events by the modified ones,
 # after converting them back to relative offsets, knowing that
@@ -186,6 +194,34 @@ sub _prepare_io {
 }
 
 # utilities
+{
+    my $previous_bar;
+    my @patterns;
+
+    sub get_pattern {
+        my ($pattern, $current_bar) = @_;
+
+        return normalize_pattern($pattern) unless -e $pattern->[0];
+
+        $previous_bar ||= 0;
+
+        unless (@patterns) {
+            open my $PATTERNS, '<', $pattern->[0] or die $!;
+            @patterns = map { normalize_pattern([split /\s+/]) } 
+            List::Util::shuffle( <$PATTERNS> );
+            close $PATTERNS or die $!;
+        }
+
+        if ($previous_bar == $current_bar) {
+            return $patterns[-1];
+        }
+        else {
+            $previous_bar = $current_bar;
+            push @patterns, shift @patterns;
+            return $patterns[-1];
+        }
+    }
+}
 sub named_to_positional_pattern {
     my ($named) = @_ or return;
 
@@ -333,7 +369,7 @@ sub in_grid {
     my ($self, $event, $note, $tolerance) = @_;
 
     $tolerance = $self->ms_to_ticks($tolerance);
-    my $ticks = $self->tick_length;
+    my $ticks = $self->tick_length / 2;
 
     for my $measure ($self->get_grid($note)) {
         for my $nth_note (0 .. @$measure - 1) {
@@ -425,6 +461,14 @@ sub to_format_1 {
 
     return $copy;
 }
+sub current_bar {
+    my ($self, $resolution, $event) = @_;
+    my $nbars = $self->note_count($resolution) / $resolution;
+
+    return int ($event->[1] / ($opus->tick_length / $nbars));
+}
+
+
 __END__
 
 
