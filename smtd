@@ -112,7 +112,7 @@ $opus->tracks_r->[1]->events_r(
         # beyond the measure, for looping purposes
         map {
             $ARGV{clip}
-            ? clip_at_bar($_, $opus->tick_length * $i)
+            ? clip_at_bar($_, ($opus->tick_length / (1 + $opus->current_bar($ARGV{resolution}, $_))) * $i)
             : $_
         } @$rel_events
     } 1 .. $ARGV{loop} ]
