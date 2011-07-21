@@ -34,19 +34,21 @@ my ( $INH, $OUTH, $ERRH ) = _prepare_io( \%ARGV, \@ARGV );
 # we need to check that the file format is v1,
 # since I don't really understand all the possible variations.
 my $opus = MIDI::Opus->new({
+    exclude => [qw/track_name patch_change control_change/],
     @ARGV
     ? (from_file   => shift @ARGV)
     : (from_handle => $INH)
 });
 
 
+
 # default resolution to fastest metrical level
-# default magnitude to 1 ms, this allows to use -p in absolute terms
+# default magnitude to 0 ms
 # default grid tolerance to 0 ms
 # allow user to specify either positional or named patterns
 # note that named patterns, if present, override positional ones
 $ARGV{resolution} ||= $opus->fastest_metrical_level;
-$ARGV{magnitude}  ||= 1;
+$ARGV{magnitude}  ||= 0;
 $ARGV{tolerance}  ||= 0;
 $ARGV{dump}       ||= 0;
 $ARGV{pattern}    ||= [(1) x $ARGV{resolution}];
@@ -69,6 +71,7 @@ if ($ARGV{dump}) {
     $opus->dump({dump_tracks => 1, flat => 0});
     exit;
 }
+
 
 # main program:
 # The strategy is to make all midi events' delta-times absolute,
@@ -96,29 +99,30 @@ map {
     )
 } @$abs_events;
     
-
 # we can now replace the original events by the modified ones,
 # after converting them back to relative offsets, knowing that
 # there can be no negative offsets, due to the sorting.
 my $rel_events = $opus->abs2rel(\@abs_events);
+
 $opus->tracks_r->[1]->events_r(
 
     # this just concatenates multiple copies of the events
     # for replicating the input measure[s] $ARGV{loop} times
     [ map { 
         my $i = $_;
+        my $ticks = $opus->tick_length;
 
         # this optionally clips events ending
         # beyond the measure, for looping purposes
         map {
+            my $bar = $opus->current_bar($ARGV{resolution}, $_);
             $ARGV{clip}
-            ? clip_at_bar($_, ($opus->tick_length / (1 + $opus->current_bar($ARGV{resolution}, $_))) * $i)
+            ? clip_at_bar($_, ($ticks / (1 + $bar) * $i))
             : $_
         } @$rel_events
     } 1 .. $ARGV{loop} ]
 
 );
-
 
 if ($ARGV{debug}) {
     $opus->debug;
@@ -177,7 +181,7 @@ sub _prepare_io {
             or die "Can't write $opt->{output}: $!";
     }
     elsif ( exists $opt->{play} ) {
-        open $OUTH, '|-', 'timidity -idqq -EFreverb=0 -EFchorus=0 -A120 -OsM -'
+        open $OUTH, '|-', "timidity -idqq -EFreverb=0 -EFchorus=0 -A120 -OsM -"
         or die "Can't pipe to timidity: $!";
     }
     else { $OUTH = *STDOUT }
@@ -237,7 +241,7 @@ sub named_to_positional_pattern {
 sub normalize_pattern {
     my ($pattern) = @_;
 
-    my $norm_factor = List::Util::max(@$pattern);
+    my $norm_factor = List::Util::max(map { abs $_ } @$pattern);
 
     return $pattern unless $norm_factor;
     return [map { $_ / $norm_factor } @$pattern];
@@ -338,6 +342,7 @@ sub mtd {
     my $weight_index = $self->in_grid($o{event}, $o{resolution}, $o{tolerance});
 
     if (defined $weight_index) {
+
         $o{event}->[1]
         += sprintf(
             "%.0f",
@@ -383,6 +388,7 @@ sub in_grid {
             return $nth_note
             if  $tick_in_bar >= $measure->[$nth_note] - $tolerance
             and $tick_in_bar <= $measure->[$nth_note] + $tolerance;
+
         }
     }
 }
