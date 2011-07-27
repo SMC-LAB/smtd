@@ -67,7 +67,6 @@ $opus->set_bpm($ARGV{tempo});
 $opus->transpose($ARGV{transpose}, 3) if $ARGV{transpose};
 $opus->transpose($ARGV{bank}, 2) if $ARGV{bank};
 $opus->scale_grid($ARGV{ppqn} / $opus->ticks) if $ARGV{ppqn};
-$opus->insert_mock_event;
 
 if ($ARGV{dump}) {
     $opus->dump({dump_tracks => 1, flat => 0});
@@ -131,6 +130,7 @@ if ($ARGV{debug}) {
     exit;
 }
 
+$opus->insert_mock_event;
 
 # and we're done!
 # if we print to STDOUT, binary data might screw up the terminal
@@ -147,7 +147,7 @@ sub _meta_options {
 
     return (
         'quiet'     => sub { $opt->{quiet}   = 1;          $opt->{verbose} = 0 },
-        'verbose:i' => sub { $opt->{verbose} = $_[1] // 1; $opt->{quiet}   = 0 },
+        'verbose:i' => sub { $opt->{verbose} = $_[1] || 1; $opt->{quiet}   = 0 },
         'version'   => sub { pod2usage( -sections => ['VERSION', 'REVISION'],
                                         -verbose  => 99 )                      },
         'license'   => sub { pod2usage( -sections => ['AUTHOR', 'COPYRIGHT'],
@@ -381,7 +381,7 @@ sub in_grid {
     my ($self, $event, $note, $tolerance) = @_;
 
     $tolerance = $self->ms_to_ticks($tolerance);
-    my $ticks = $self->tick_length / 2;
+    my $ticks = $self->tick_length;
 
     for my $measure ($self->get_grid($note)) {
         for my $nth_note (0 .. @$measure - 1) {
@@ -474,10 +474,12 @@ sub to_format_1 {
 
     return $copy;
 }
+
 sub insert_mock_event {
     my ($self) = @_;
 
-    unshift @{$self->tracks_r->[1]->events_r}, ['text_event', 0, 'ignore'];
+	# nasty hack to force timidity to use an off-set on the first real note
+    unshift @{$self->tracks_r->[1]->events_r}, ['note_on', 0, 0, 0, 1];
 }
 sub current_bar {
     my ($self, $resolution, $event) = @_;
