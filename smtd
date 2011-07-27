@@ -22,7 +22,7 @@ GetOptions(
     'pattern|p=s@{,}', 'named-pattern|np=f%',
     'tolerance|t=f', 'loop|l=i', 'tempo|b=f',
     'dump|d', 'transpose|s=i%', 'debug',
-    'clip|c', 'bank|k=i%', 'play|y',
+    'clip|c', 'bank|k=i%', 'play|y', 'ppqn=i',
     _meta_options(\%ARGV),
 ) or pod2usage(-verbose => 1);
 
@@ -66,6 +66,8 @@ $opus = $opus->to_format_1;
 $opus->set_bpm($ARGV{tempo});
 $opus->transpose($ARGV{transpose}, 3) if $ARGV{transpose};
 $opus->transpose($ARGV{bank}, 2) if $ARGV{bank};
+$opus->scale_grid($ARGV{ppqn} / $opus->ticks) if $ARGV{ppqn};
+$opus->insert_mock_event;
 
 if ($ARGV{dump}) {
     $opus->dump({dump_tracks => 1, flat => 0});
@@ -349,6 +351,7 @@ sub mtd {
             $self->ms_to_ticks($o{magnitude} * $o{weights}->[$weight_index])
         );
     }
+    else {die Dumper $o{event}}
 
     return $o{event};
 }
@@ -443,7 +446,7 @@ sub abs2rel {
 sub to_format_1 {
     my ($self) = @_;
     return $self if $self->format == 1
-    && $self->tracks > 1;
+    && $self->tracks == 2;
 
     my $copy = $self->copy;
 
@@ -470,6 +473,11 @@ sub to_format_1 {
     );
 
     return $copy;
+}
+sub insert_mock_event {
+    my ($self) = @_;
+
+    unshift @{$self->tracks_r->[1]->events_r}, ['text_event', 0, 'ignore'];
 }
 sub current_bar {
     my ($self, $resolution, $event) = @_;
